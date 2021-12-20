@@ -1,118 +1,101 @@
 # coding: utf-8
-from pygvm.Request import Request
-from pygvm.constants import base_url
+
+import requests
+
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+from .api import APISET
+from .utils import xml_loads, xml_to_dict
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 
-class Client():
-    """gvm web client"""
+class GSAHttpClient(object):
+    """GSAClient
+    GVM client based on GSA http api.
 
-    def __init__(self, host, username=None, password=None, port=9390):
+    use Requests as http client, manage session and token
+    """
+    BASE_URL = "https://{}:{}/gmp"
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
+    }
+
+    def __init__(self, host, port=9393, username=None, password=None):
+        self.api = APISET
         self.host = host
         self.port = port
         self.username = username
         self.password = password
+        self.base_url = self.BASE_URL.format(self.host, self.port)
+        self.api.set_base_url(self.base_url)
         self.token = None
-        self.cookies = {}
-        self.base_url = base_url.format(self.host, self.port)
+        self.session = None
 
-    def login(self):
-        # 登录获取token和cookie
-        cookies, resp_data, = Request.auth(self.base_url, username=self.username, password=self.password)
-        self.cookies = cookies
-        token = resp_data.get("token")
-        self.token = token
-
-    def task_conut(self, filter_str="sort=name rows=1"):
-        # 获取当前任务的全部数量
-        params = {
-            "token": self.token,
-            "cmd": "get_tasks",
-            "usage_type": "scan",
-            "filter": filter_str
-        }
-        task_count = Request.count(self.base_url, cookies=self.cookies, params=params)
-        return int(task_count)
-
-    def list_tasks(self):
-        # 获取所有任务
-        filter_str = "sort=name rows=-1"
-        params = {
-            "token": self.token,
-            "cmd": "get_tasks",
-            "usage_type": "scan",
-            "filter": filter_str
-        }
-        return Request.list(self.base_url, cookies=self.cookies, params=params)
-
-    def get_task(self, task_id=None):
-        # 获取任务的结果，不包含任务报告
-        params = {
-            "token": self.token,
-            "cmd": "get_task",
-            "task_id": task_id
-        }
-        return Request.get(self.base_url, cookies=self.cookies, params=params)
-
-    def get_task_report_id(self, task_id=None):
-        # 获取任务的报告id
-        params = {
-            "token": self.token,
-            "cmd": "get_task",
-            "task_id": task_id
-        }
-        task_data = Request.get(self.base_url, cookies=self.cookies, params=params)
-        # TODO 多个状态的任务获取
-        if task_data["status"] == "Running":
-            # 当任务正在运行
-            return task_data["current_report"]["report"]["@id"]
-        elif task_data["status"] == "Done":
-            # 当任务运行结束
-            return task_data["last_report"]["report"]["@id"]
-
-    def get_task_vul_result(self, task_id=None, severity=0.0):
-        result = []
-        report_id = self.get_task_report_id(task_id=task_id)
-        filter_str = "min_qod=70 rows=-1 sort=name"
-        params = {
-            "token": self.token,
-            "cmd": "get_report",
-            "lean": "1",
-            "ignore_pagination": "1",
-            "details": "1",
-            "filter_str": filter_str,
-            "report_id": report_id
-        }
-        task_data = Request.get_report(self.base_url, cookies=self.cookies, params=params)
-        for i in task_data["report"]["results"]["result"]:
-            if float(i["severity"]) == float(severity):
-                continue
-            result.append(i)
+    def get(self, params, timeout=None):
+        params['token'] = self.token
+        resp = self.session.get(self.base_url, params=params, timeout=timeout)
+        result = self.parse_response(resp)
         return result
 
-    def get_task_status(self, task_id=None):
-        # 获取任务的状态
-        params = {
-            "token": self.token,
-            "cmd": "get_task",
-            "task_id": task_id
-        }
-        task_data = Request.get(self.base_url, cookies=self.cookies, params=params)
-        return task_data["status"]
+    def post(self, data, params=None, files=None, timeout=None):
+        params = {} if params is None else params
+        data = {} if data is None else data
+        data['token'] = self.token
+        resp = self.session.post(
+            self.base_url,
+            params=params, data=data, files=files,
+            timeout=timeout,
+        )
+        result = self.parse_response(resp)
+        return result
 
-    def get_task_process(self, task_id=None):
-        # 获取任务的进度
-        params = {
-            "token": self.token,
-            "cmd": "get_task",
-            "task_id": task_id
+    def parse_response(self, resp):
+        data = xml_to_dict(xml_loads(resp.content))
+        if "envelope" not in data:
+            raise ValueError("envelope not found, maybe bad request")
+        if data['envelope'].get('gsad_response'):
+            raise ValueError(data['envelope']['gsad_response'])
+
+        # 部分异常处理
+        error = data["envelope"].get("action_result")
+        if error and not error["message"].startswith("OK"):
+            raise ValueError(data["envelope"]["action_result"]["message"])
+        return data['envelope']
+
+    def login(self):
+        """登陆接口
+        设cookies，拿token
+        """
+        # 登录获取token和cookie
+        # cookies, resp_data = GSAHttp.auth(self.base_url, username=self.username, password=self.password)
+        self.session = requests.Session()
+        # login
+        multipart_data = (
+            ("cmd", "login"),
+            ("login", self.username),
+            ("password", self.password),
+        )
+        resp = self.session.post(self.base_url, data=multipart_data, headers=self.HEADERS, verify=False)
+        data = self.parse_response(resp)
+        self.token = data.get("token")
+
+    def renew(self):
+        """默认接口需要15分钟刷新一次token防止超时登出"""
+        data = {
+            "cmd": "renew_session",
         }
-        task_data = Request.get(self.base_url, cookies=self.cookies, params=params)
-        if task_data["status"] == "Running":
-            return task_data["progress"]
+        data = self.post(data=data)
+        print("next renew timestamp: {}".format(data['session']))
+
+    def logout(self):
+        self.session.close()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
+        self.logout()
 
     def __enter__(self):
         self.login()
+        self.api.set_client(self)
+        self.api.prepare()
         return self

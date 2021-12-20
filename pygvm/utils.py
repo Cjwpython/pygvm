@@ -4,11 +4,11 @@ import collections
 import six
 
 
-def str_to_lxml(Str):
+def xml_loads(Str):
     return ET.XML(Str)
 
 
-def lxml_to_dict(tree):
+def xml_to_dict(tree):
     try:
         dct = {tree.tag: {} if tree.attrib else None}
     except AttributeError:
@@ -17,7 +17,7 @@ def lxml_to_dict(tree):
     children = list(tree)
     if children:
         default_dict = collections.defaultdict(list)
-        for child in [lxml_to_dict(child) for child in children]:
+        for child in [xml_to_dict(child) for child in children]:
             if child:
                 for key, value in six.iteritems(child):
                     default_dict[key].append(value)
